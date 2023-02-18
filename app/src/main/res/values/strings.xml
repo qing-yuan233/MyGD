@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">CameraJava</string>
+    <string name="take_photo">照相</string>
+    <string name="start_capture">录像</string>
+    <string name="stop_capture">停止录像</string>
+
+</resources>
