@@ -1,18 +1,23 @@
 package com.example.camerajava;
 
-import static com.example.camerajava.MyTool.saveBitmap;
+import static androidx.camera.core.ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888;
+import static com.example.camerajava.MainActivity.Configuration.TAG;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.ContentValues;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
+import android.graphics.ImageFormat;
 import android.media.Image;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
+import android.text.TextUtils;
+import android.util.Base64;
 import android.util.Log;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -38,14 +43,22 @@ import androidx.core.content.ContextCompat;
 import com.example.camerajava.databinding.ActivityMainBinding;
 import com.google.common.util.concurrent.ListenableFuture;
 
-import java.io.File;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
 import java.util.Locale;
-import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import okhttp3.Call;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 //摄像头开启的页面
 public class MainActivity extends AppCompatActivity {
@@ -59,12 +72,31 @@ public class MainActivity extends AppCompatActivity {
 
     private ExecutorService cameraExecutor;
 
+    private static MyWebSocket myWebSocket;
+
+    //发送照片的频率
+    private static int frequent;
+
+    private static int imgNumber;
+
+    //计数结果
+    private int jumpCount;
+
+    private static TextView countTextView;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         viewBinding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(viewBinding.getRoot());
+
+        countTextView = (TextView) findViewById(R.id.countNumber);
+
+        //每5帧发送一次请求
+        frequent = 5;
+        //摄像头捕获的图片数量计数
+        imgNumber = 0;
 
         // 请求相机权限
         if (allPermissionsGranted()) {
@@ -81,6 +113,15 @@ public class MainActivity extends AppCompatActivity {
         //viewBinding.videoCaptureButton.setOnClickListener(v -> turnImageAnalysis());
 
         cameraExecutor = Executors.newSingleThreadExecutor();
+
+        //实例化websocket
+        //myWebSocket = new MyWebSocket("http://192.168.1.102:9999");
+        //连接
+        //myWebSocket.connect();
+
+        jumpCount=0;
+
+
 
     }
 
@@ -135,12 +176,12 @@ public class MainActivity extends AppCompatActivity {
                                         ((VideoRecordEvent.Finalize) videoRecordEvent).getOutputResults()
                                                 .getOutputUri();
                                 Toast.makeText(getBaseContext(), msg, Toast.LENGTH_SHORT).show();
-                                Log.d(Configuration.TAG, msg);
+                                Log.d(TAG, msg);
                             } else {
                                 if (recording != null) {
                                     recording.close();
                                     recording = null;
-                                    Log.e(Configuration.TAG, "Video capture end with error: " +
+                                    Log.e(TAG, "Video capture end with error: " +
                                             ((VideoRecordEvent.Finalize) videoRecordEvent).getError());
                                 }
                             }
@@ -183,12 +224,12 @@ public class MainActivity extends AppCompatActivity {
                         public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
                             String msg = "照片捕获成功! " + outputFileResults.getSavedUri();
                             Toast.makeText(getBaseContext(), msg, Toast.LENGTH_SHORT).show();
-                            Log.d(Configuration.TAG, msg);
+                            Log.d(TAG, msg);
                         }
 
                         @Override
                         public void onError(@NonNull ImageCaptureException exception) {
-                            Log.e(Configuration.TAG, "Photo capture failed: " + exception.getMessage());// 拍摄或保存失败时
+                            Log.e(TAG, "Photo capture failed: " + exception.getMessage());// 拍摄或保存失败时
                         }
                     });
         }
@@ -226,8 +267,9 @@ public class MainActivity extends AppCompatActivity {
                 // 创建拍照所需的实例
                 imageCapture = new ImageCapture.Builder().build();
 
-                 //设置预览帧分析
+                 //设置预览帧分析(这里设置了捕获图像的格式为rgba8888)
                 ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
+                        //.setOutputImageFormat(OUTPUT_IMAGE_FORMAT_RGBA_8888)
                         .build();
                 imageAnalysis.setAnalyzer(cameraExecutor, new MyAnalyzer());
 
@@ -242,30 +284,167 @@ public class MainActivity extends AppCompatActivity {
                         videoCapture*/);
 
             } catch (Exception e) {
-                Log.e(Configuration.TAG, "用例绑定失败！" + e);
+                Log.e(TAG, "用例绑定失败！" + e);
             }
         }, ContextCompat.getMainExecutor(this));
 
     }
 
+
+    private static void sendOkhttp(ImageProxy imageProxy,Image image,String imageName) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                //jpeg图像的字节流数组
+                byte[] bytes = Utils.YuvToJpeg(image);
+                //String base64Image = Base64.getEncoder().encodeToString(bytes);
+                //转为base64编码，并使用字符串存储
+                String base64Image = Base64.encodeToString(bytes, Base64.NO_WRAP);
+                JSONObject data = new JSONObject();
+                try {
+                    data.put("image", base64Image);
+                    data.put("imageName",imageName);
+                } catch (JSONException e) {
+                    throw new RuntimeException(e);
+                }
+                String message = data.toString();
+
+                OkHttpClient okHttpClient = new OkHttpClient();
+
+                MediaType mediaType = MediaType.parse("application/json; charset=utf-8");
+                RequestBody body = RequestBody.create(message,mediaType);
+
+                Request request = new Request.Builder()
+                        .url("http://192.168.1.102:9999/jumpcount")
+                        .post(body)
+                        .build();
+
+
+
+                //Request request = new Request.Builder().url("http://192.168.1.102:9999").addHeader("Connection", "close").build();
+                try {
+                    Response response = okHttpClient.newCall(request).execute();
+                    String responseDate = response.body().string();
+                    Log.d(TAG, "返回结果："+responseDate);
+
+
+                } catch (IOException e) {
+                    //sendOkhttp(image,imageName);
+                    throw new RuntimeException(e);
+                }
+                //imageProxy.close();
+
+            }
+        }).start();
+    }
+
     //实时预览分析类
     //这个分析类就是打印每一个预览帧画面的时间戳
-    private static class MyAnalyzer implements ImageAnalysis.Analyzer{
+    private class MyAnalyzer implements ImageAnalysis.Analyzer{
         @SuppressLint("UnsafeOptInUsageError")
         @Override
         public void analyze(@NonNull ImageProxy image) {
             //或取实时显示图像
             final Image singleImg = image.getImage();
+
+            imgNumber++;
+            if (imgNumber%frequent==0) {
+                //打印图像信息
+                Log.d("size", singleImg.getWidth() + ", " + singleImg.getHeight());
+                //设置图像名称和格式
+                String name = new SimpleDateFormat(Configuration.FILENAME_FORMAT,
+                        Locale.SIMPLIFIED_CHINESE).format(System.currentTimeMillis());
+
+
+                //使用websocket发送
+//                try {
+//                    myWebSocket.sendImage("jumpcount",singleImg,name);
+//                } catch (IOException e) {
+//                    throw new RuntimeException(e);
+//                } catch (JSONException e) {
+//                    throw new RuntimeException(e);
+//                }
+                //发送http请求==========================================================
+                //sendOkhttp(image,singleImg,name);
+                //jpeg图像的字节流数组
+                //byte[] bytes = Utils.YuvToJpeg(singleImg);
+                //byte[] bytes = Utils.Yuv_420_888_ToJpeg(singleImg);
+                byte[] bytes = Utils.YUV_420_888toNV21toJpeg(singleImg);
+                //byte[] bytes = Utils.RGB8888ToJpeg(singleImg);
+                //String base64Image = Base64.getEncoder().encodeToString(bytes);
+                //转为base64编码，并使用字符串存储
+                String base64Image = Base64.encodeToString(bytes, Base64.NO_WRAP);
+                JSONObject data = new JSONObject();
+                try {
+                    data.put("image", base64Image);
+                    data.put("imageName",name);
+                } catch (JSONException e) {
+                    throw new RuntimeException(e);
+                }
+                String message = data.toString();
+
+                OkHttpClient okHttpClient = new OkHttpClient();
+
+                MediaType mediaType = MediaType.parse("application/json; charset=utf-8");
+                RequestBody body = RequestBody.create(message,mediaType);
+
+                Request request = new Request.Builder()
+                        .url("http://192.168.1.102:9999/jumpcount")
+                        .post(body)
+                        .build();
+
+                // 发送请求并处理响应
+                okHttpClient.newCall(request).enqueue(new okhttp3.Callback() {
+                    @Override
+                    public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
+                        String responseBody = response.body().string();
+                        Log.d(TAG, "Server response: " + responseBody);
+                        //更新UI
+                        if (TextUtils.isDigitsOnly(responseBody)) {
+                            int num = Integer.parseInt(responseBody);
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    // 在主线程中更新UI
+                                    countTextView.setText("计数结果：" + num);
+                                }
+                            });
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                        Log.e(TAG, "Failed to send image to server", e);
+                    }
+
+                });
+
+            }
+            image.close();
+
             //Log.d(Configuration.TAG, "Image's stamp is " + Objects.requireNonNull(image.getImage()).getTimestamp());
-            Log.d("size", singleImg.getWidth() + ", " + singleImg.getHeight());
+            //Log.d("size", singleImg.getWidth() + ", " + singleImg.getHeight());
+
 
 
             //设置图像名称和格式
-            String name = new SimpleDateFormat(Configuration.FILENAME_FORMAT,
-                    Locale.SIMPLIFIED_CHINESE).format(System.currentTimeMillis());
-            ContentValues contentValues = new ContentValues();
-            contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
-            contentValues.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+//            String name = new SimpleDateFormat(Configuration.FILENAME_FORMAT,
+//                    Locale.SIMPLIFIED_CHINESE).format(System.currentTimeMillis());
+
+//            ContentValues contentValues = new ContentValues();
+//            contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+//            contentValues.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+
+            //websocket连接发送图片(此时此刻已经连上了)
+
+//            //子线程里发送图像和信息
+//            WebsocketThread websocketThread = new WebsocketThread(myWebSocket,singleImg,name);
+//            websocketThread.start();
+
+//          myWebSocket.sendImage(singleImg,name);
+//          在其回调函数里先打印计数
+
+
 
 
             //获取图像后做的另一些处理
@@ -278,7 +457,7 @@ public class MainActivity extends AppCompatActivity {
 //                throw new RuntimeException(e);
 //            }
 
-            image.close();
+            //image.close();
         }
     }
 
@@ -295,6 +474,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        //capmyWebSocket.close();
         cameraExecutor.shutdown();
     }
 
